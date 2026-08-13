@@ -169,13 +169,116 @@ cat <<EOF
     Installing into    ${INSTALL_DIR}
 EOF
 
+# ── Basic tools ─────────────────────────────────────────────────────────────────────────────────
+# Installed before the checks below because those need curl. Deliberately ahead of the "Continue?"
+# confirmation: these are small, standard packages, and without them nothing can be verified.
+step "Preparing"
+export DEBIAN_FRONTEND=noninteractive
+missing=""
+for pkg in ca-certificates curl openssl; do
+  case "$pkg" in
+    ca-certificates) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
+    *) command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
+  esac
+done
+if [ -n "$missing" ]; then
+  apt-get update -qq
+  # shellcheck disable=SC2086
+  apt-get install -y -qq $missing >/dev/null
+fi
+
+# ── Ports ───────────────────────────────────────────────────────────────────────────────────────
+# Many server images ship Apache or nginx already listening on 80. Caddy needs both ports to serve
+# the site AND to prove to Let's Encrypt that you own the address, so a conflict has to be resolved
+# before anything else — otherwise the first run gets all the way to the end and then fails.
+step "Checking ports 80 and 443"
+busy=""
+for port in 80 443; do
+  if command -v ss >/dev/null 2>&1; then
+    ss -Hltn "sport = :$port" 2>/dev/null | grep -q . && busy="$busy $port"
+  elif command -v netstat >/dev/null 2>&1; then
+    netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$" && busy="$busy $port"
+  fi
+done
+if [ -n "$busy" ]; then
+  # ss reports the owner as users:(("nginx",pid=…)) — pull out just the quoted program name.
+  holder="$(ss -Hltnp "sport = :80" 2>/dev/null | grep -oE '"[^"]+"' | head -1 | tr -d '"' || true)"
+  die "Port${busy} already in use${holder:+ (by ${holder})}.
+
+GRG needs ports 80 and 443. Another web server is probably already running.
+If it's Apache or nginx and you don't need it:
+
+    sudo systemctl disable --now apache2 2>/dev/null || true
+    sudo systemctl disable --now nginx 2>/dev/null || true
+
+Then run this again."
+fi
+info "Both ports are free."
+
+# ── Web addresses ───────────────────────────────────────────────────────────────────────────────
+# Checked BEFORE installing anything, and offered as something to fix right now, because this is
+# the one prerequisite the installer can't do for you — and getting it wrong is the difference
+# between the first run working and the first run needing a second run.
+step "Checking your web addresses"
+if [ "$SKIP_DNS_CHECK" -eq 1 ]; then
+  info "Skipped."
+else
+  public_ip="$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
+  if [ -z "$public_ip" ]; then
+    warn "Couldn't work out this server's public address — skipping the check."
+  else
+    info "This server is ${public_ip}"
+    while :; do
+      bad=""
+      for host in "$APP_DOMAIN" "$MEDIA_DOMAIN"; do
+        # `|| true` is load-bearing: getent exits 2 for a name that doesn't resolve, and with
+        # pipefail + set -e that would abort the installer instead of showing the instructions
+        # below — exactly when someone's DNS isn't set up yet.
+        resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}' || true)"
+        if [ "$resolved" = "$public_ip" ]; then
+          info "${host} ✓"
+        elif [ -z "$resolved" ]; then
+          info "${host} — not set up yet"; bad="yes"
+        else
+          info "${host} — points at ${resolved} instead"; bad="yes"
+        fi
+      done
+      [ -z "$bad" ] && break
+
+      cat <<EOF
+
+  ${Y}Both addresses need to point at this server before GRG can get its
+  security certificate. Add these two records with whoever manages your
+  domain, then come back to this window:${N}
+
+      Type    Name                      Value
+      A       ${APP_DOMAIN}    ${public_ip}
+      A       ${MEDIA_DOMAIN}    ${public_ip}
+
+  ${D}New records usually work within a few minutes.${N}
+EOF
+      if [ -z "$TTY_IN" ]; then
+        die "Addresses aren't pointing here yet. Add the records above and run this again."
+      fi
+      printf '\n  %sPress Enter to check again, or type "skip" to carry on anyway:%s ' "$B" "$N"
+      IFS= read -r again < "$TTY_IN" || again="skip"
+      case "$again" in
+        [Ss]*) warn "Carrying on. HTTPS won't work until the addresses point here."; break ;;
+      esac
+    done
+  fi
+fi
+
+cat <<EOF
+
+  ${B}Ready${N} — everything checks out. This takes about five minutes.
+EOF
 confirm "Continue?" || die "Nothing was changed."
 
 # ── Dependencies ────────────────────────────────────────────────────────────────────────────────
 step "Installing what's missing"
-export DEBIAN_FRONTEND=noninteractive
 missing=""
-for pkg in ca-certificates curl gnupg openssl tar ufw; do
+for pkg in gnupg tar ufw; do
   case "$pkg" in
     ca-certificates|gnupg) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
     *) command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
@@ -294,34 +397,6 @@ if [ -n "$GRG_VERSION" ]; then
     printf '\nGRG_VERSION=%s\n' "$GRG_VERSION" >> .env
   fi
   info "Using version ${GRG_VERSION}."
-fi
-
-# ── Addresses ───────────────────────────────────────────────────────────────────────────────────
-step "Checking your web addresses"
-if [ "$SKIP_DNS_CHECK" -eq 1 ]; then
-  info "Skipped."
-else
-  public_ip="$(curl -fsS --max-time 10 https://api.ipify.org 2>/dev/null || true)"
-  [ -n "$public_ip" ] && info "This server's address is ${public_ip}"
-  dns_ok=1
-  for host in "$APP_DOMAIN" "$MEDIA_DOMAIN"; do
-    resolved="$(getent ahostsv4 "$host" 2>/dev/null | awk '{print $1; exit}')"
-    if [ -z "$resolved" ]; then
-      warn "${host} doesn't point anywhere yet."
-      dns_ok=0
-    elif [ -n "$public_ip" ] && [ "$resolved" != "$public_ip" ]; then
-      warn "${host} points at ${resolved}, not this server (${public_ip})."
-      dns_ok=0
-    else
-      info "${host} points here ✓"
-    fi
-  done
-  if [ "$dns_ok" -eq 0 ]; then
-    warn ""
-    warn "GRG needs both addresses pointing at this server to get its security certificate."
-    warn "Add an 'A' record for each at your domain provider, then run this script again."
-    warn "Everything else is already done, so re-running is quick."
-  fi
 fi
 
 # ── Firewall ────────────────────────────────────────────────────────────────────────────────────
