@@ -1,0 +1,41 @@
+# The only thing exposed to the network. Terminates TLS, serves the SPA, and reverse-proxies
+# the API to the backend.
+#
+# TWO public hostnames, and no more. ZITADEL deliberately has none: its ZITADEL_EXTERNALDOMAIN is
+# the internal Docker service name (`zitadel`), because the backend — its only client — reaches it
+# that way. Publishing it on a real domain would hand browsers a Host that doesn't match the
+# instance, so it stays on the internal network where it belongs. Admin the instance, if ever
+# needed, over an SSH tunnel: `ssh -L 8080:localhost:8080 host` after temporarily publishing it.
+{
+	email {$ACME_EMAIL}
+}
+
+# ── App: one host serves the SPA and proxies /api to Spring ──
+{$APP_DOMAIN} {
+	handle /api/* {
+		reverse_proxy backend:8080
+	}
+	handle {
+		root * /srv/www
+		try_files {path} /index.html      # SPA client-side routing
+		file_server
+	}
+
+	header {
+		# The SPA is same-origin only; nothing here should ever be framed or sniffed.
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		# Only meaningful once served over real HTTPS; harmless on Caddy's local CA.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+	}
+}
+
+# ── Media (Garage's S3 API) — browsers fetch presigned image/video URLs straight from here.
+# Path and Host must reach Garage UNCHANGED (Caddy preserves Host by default, no rewriting here)
+# because the presigned URL's SigV4 signature covers both — the backend signs URLs against this
+# exact domain, so any rewrite would invalidate the signature. This is also why media can't be
+# folded onto a path under APP_DOMAIN and needs a hostname of its own. ──
+{$MEDIA_DOMAIN} {
+	reverse_proxy garage:3900
+}

@@ -1,0 +1,171 @@
+# GRG — self-contained on-prem stack. Everything runs from prebuilt images; nothing is compiled
+# on this host. Caddy is the only thing exposed to the network: it terminates TLS, serves the SPA,
+# and reverse-proxies /api to the backend. Users never touch ZITADEL directly; only the backend
+# does, over the internal network in plain HTTP.
+#
+# GRG_VERSION pins the image tag — `latest`, or a `sha-xxxxxxx` tag to pin/roll back to a specific
+# build. Every published tag was smoke-tested in CI before `latest` was moved to it.
+name: grg
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql          # PG18: mount here, not /data
+      - ./init-zitadel-db.sql:/docker-entrypoint-initdb.d/10-init-zitadel-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER} -d ${DB_NAME}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # Makes the shared PAT volume writable by ZITADEL's non-root user before it boots.
+  alpine-keyinit:
+    image: alpine:3
+    command: ["sh", "-c", "chmod 777 /machinekey"]
+    volumes:
+      - machinekey:/machinekey
+
+  # Self-bootstrapping on first init: creates the GRG org + a machine service account, and writes
+  # its Personal Access Token to the shared volume for the backend to read.
+  zitadel:
+    image: ghcr.io/zitadel/zitadel:latest
+    restart: unless-stopped
+    command: >
+      start-from-init
+      --masterkey ${ZITADEL_MASTERKEY}
+      --tlsMode disabled
+      --steps /steps.yaml
+    depends_on:
+      postgres:
+        condition: service_healthy
+      alpine-keyinit:
+        condition: service_completed_successfully
+    environment:
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: ${DB_USER}
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${DB_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: ${DB_USER}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${DB_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      # Must match the Host the BACKEND uses to reach it (the service name) — that's the only
+      # everyday caller. ZITADEL is never published on a public hostname.
+      ZITADEL_EXTERNALDOMAIN: zitadel
+      ZITADEL_EXTERNALPORT: 8080
+      ZITADEL_EXTERNALSECURE: "false"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "false"
+    volumes:
+      - ./zitadel/steps.yaml:/steps.yaml:ro
+      - machinekey:/machinekey
+
+  # S3-compatible object storage for visit photos/videos and client logos. Not exposed directly:
+  # the backend reaches it over the internal network, and browsers reach it only through Caddy's
+  # media subdomain via presigned GET URLs.
+  garage:
+    image: dxflrs/garage:v1.2.0
+    restart: unless-stopped
+    environment:
+      GARAGE_RPC_SECRET: ${GARAGE_RPC_SECRET}
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+    volumes:
+      - ./garage/garage.toml:/etc/garage.toml:ro
+      - garage_meta:/var/lib/garage/meta
+      - garage_data:/var/lib/garage/data
+    healthcheck:
+      test: ["CMD", "/garage", "status"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    expose: ["3900", "3903"]
+
+  # One-shot: assigns the single-node cluster layout, creates the media bucket, and imports the
+  # backend's access key. Every step checks current state first, so re-running is a safe no-op.
+  garage-init:
+    image: curlimages/curl:latest
+    depends_on:
+      garage:
+        condition: service_healthy
+    environment:
+      GARAGE_ADMIN_TOKEN: ${GARAGE_ADMIN_TOKEN}
+      GARAGE_ACCESS_KEY_ID: ${GARAGE_ACCESS_KEY_ID}
+      GARAGE_SECRET_ACCESS_KEY: ${GARAGE_SECRET_ACCESS_KEY}
+    volumes:
+      - ./garage/bootstrap.sh:/bootstrap.sh:ro
+    entrypoint: ["sh", "/bootstrap.sh"]
+
+  backend:
+    image: ghcr.io/gravestone-codes/grg-backend:${GRG_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      garage-init:
+        condition: service_completed_successfully
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
+      SPRING_DATASOURCE_USERNAME: ${DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
+      GRG_APP_BASE_URL: https://${APP_DOMAIN}
+      GRG_ZITADEL_ISSUER: http://zitadel:8080
+      GRG_ZITADEL_TOKEN_FILE: /machinekey/pat.txt
+      GRG_FIRST_ADMIN_EMAIL: ${FIRST_ADMIN_EMAIL}
+      GRG_FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD}
+      GRG_FIRST_ADMIN_FULL_NAME: ${FIRST_ADMIN_FULL_NAME}
+      GRG_STORAGE_INTERNAL_ENDPOINT: http://garage:3900
+      GRG_STORAGE_PUBLIC_ENDPOINT: https://${MEDIA_DOMAIN}
+      GRG_STORAGE_REGION: garage
+      GRG_STORAGE_BUCKET: grg-media
+      GRG_STORAGE_ACCESS_KEY_ID: ${GARAGE_ACCESS_KEY_ID}
+      GRG_STORAGE_SECRET_ACCESS_KEY: ${GARAGE_SECRET_ACCESS_KEY}
+    expose: ["8080"]           # internal only — Caddy is the sole public entry point
+    volumes:
+      - machinekey:/machinekey:ro
+
+  # One-shot: copies the prebuilt SPA into a shared volume that Caddy serves, then exits.
+  frontend-build:
+    image: ghcr.io/gravestone-codes/grg-frontend:${GRG_VERSION:-latest}
+    command: ["sh", "-c", "cp -r /dist/. /output/"]
+    volumes:
+      - frontend_dist:/output
+
+  # The only thing exposed to the network. Terminates TLS (a real ACME cert for a public domain,
+  # or Caddy's own local CA automatically for `localhost`-style addresses).
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - frontend_dist:/srv/www:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN}
+      MEDIA_DOMAIN: ${MEDIA_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    depends_on:
+      frontend-build:
+        condition: service_completed_successfully
+      backend:
+        condition: service_started
+      zitadel:
+        condition: service_started
+      garage:
+        condition: service_healthy
+
+volumes:
+  caddy_data:
+  caddy_config:
+  pg_data:
+  machinekey:
+  frontend_dist:
+  garage_meta:
+  garage_data:

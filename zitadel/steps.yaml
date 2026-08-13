@@ -1,0 +1,13 @@
+# ZITADEL first-run bootstrap (zero-touch). On first init ZITADEL creates the GRG org and a
+# machine service account for the backend, and writes its Personal Access Token to PatPath.
+# The backend reads that PAT to call ZITADEL — the customer never touches ZITADEL directly.
+FirstInstance:
+  Org:
+    Name: GRG
+    Machine:
+      Machine:
+        Username: grg-backend
+        Name: GRG Backend
+      Pat:
+        ExpirationDate: '2035-01-01T00:00:00Z'
+  PatPath: /machinekey/pat.txt

@@ -1,0 +1,23 @@
+# Single-node config. rpc_secret and the admin API's bearer token are supplied via the
+# GARAGE_RPC_SECRET / GARAGE_ADMIN_TOKEN env vars (both accepted as CLI/daemon overrides by
+# Garage itself), not baked in here — same "secrets live in .env, not committed files" rule
+# as the rest of this deploy/ directory.
+metadata_dir = "/var/lib/garage/meta"
+data_dir = "/var/lib/garage/data"
+db_engine = "sqlite"
+
+# One node, no real replication — matches the single-VM on-prem deployment target.
+replication_factor = 1
+
+rpc_bind_addr = "[::]:3901"
+# The service's own Docker DNS name — how the garage-init container (a separate container)
+# reaches this node, and also what the container uses to reach itself for its healthcheck.
+rpc_public_addr = "garage:3901"
+
+[s3_api]
+s3_region = "garage"
+api_bind_addr = "[::]:3900"
+root_domain = ".s3.garage.local"
+
+[admin]
+api_bind_addr = "[::]:3903"
