@@ -97,9 +97,11 @@ docker compose restart     # restart everything
 - **64-bit Intel/AMD servers only** (x86_64).
 - **Ubuntu and Debian.** On another system, install Docker yourself and use the
   `docker-compose.yml` here directly.
-- The application images are `ghcr.io/gravestone-codes/grg-backend` and `grg-frontend`. Every
-  published version is started against a real database in CI and has to serve traffic before it is
-  released.
+- The application images are `ghcr.io/gravestone-codes/grg-backend` (~124 MB to download) and
+  `grg-frontend` (~5 MB). Every published version is started against a real database in CI and has
+  to serve traffic before it is released.
+- Updates are small. The Java runtime and the libraries sit in their own layers that rarely change,
+  so a normal update downloads only a few MB rather than the whole image again.
 
 ## License
 
