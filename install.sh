@@ -36,6 +36,7 @@ ACME_EMAIL="${ACME_EMAIL:-}"
 ADMIN_EMAIL="${ADMIN_EMAIL:-}"
 ADMIN_NAME="${ADMIN_NAME:-GRG Admin}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/grg}"
+INSTALL_DIR_SET="${INSTALL_DIR_SET:-}"
 GRG_VERSION="${GRG_VERSION:-}"
 BUNDLE_REF="${BUNDLE_REF:-main}"
 BUNDLE_REPO="${BUNDLE_REPO:-gravestone-codes/grg-public}"
@@ -53,7 +54,7 @@ while [ $# -gt 0 ]; do
     --admin-email)    ADMIN_EMAIL="$2"; shift 2 ;;
     --admin-name)     ADMIN_NAME="$2"; shift 2 ;;
     --version)        GRG_VERSION="$2"; shift 2 ;;
-    --dir)            INSTALL_DIR="$2"; shift 2 ;;
+    --dir)            INSTALL_DIR="$2"; INSTALL_DIR_SET="$2"; shift 2 ;;
     --ref)            BUNDLE_REF="$2"; shift 2 ;;
     -y|--yes)         ASSUME_YES=1; shift ;;
     --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
@@ -144,10 +145,29 @@ confirm() {
   case "${reply:-y}" in [Yy]*|"") return 0 ;; *) return 1 ;; esac
 }
 
-# ── Checks ──────────────────────────────────────────────────────────────────────────────────────
-[ "$(id -u)" -eq 0 ] || die "Please run this with sudo."
-command -v apt-get >/dev/null 2>&1 || die "This installer is for Ubuntu and Debian. On another system, install Docker yourself and use the docker-compose.yml in this repository."
-[ "$(uname -m)" = "x86_64" ] || die "GRG is published for 64-bit Intel/AMD servers (x86_64). This machine is $(uname -m)."
+# ── Platform ────────────────────────────────────────────────────────────────────────────────────
+# Linux is the real deployment target and the only one that can install its own dependencies.
+# macOS runs everything through Docker Desktop, which has to be installed and started by hand —
+# so there the script configures and launches rather than installs.
+case "$(uname -s)" in
+  Linux)  PLATFORM=linux ;;
+  Darwin) PLATFORM=mac ;;
+  *) die "This installer supports Linux and macOS.
+
+On Windows, use install.ps1 from the same place, in PowerShell as Administrator." ;;
+esac
+
+if [ "$PLATFORM" = "linux" ]; then
+  [ "$(id -u)" -eq 0 ] || die "Please run this with sudo."
+  command -v apt-get >/dev/null 2>&1 || die "This installer handles Ubuntu and Debian automatically.
+
+On another Linux, install Docker yourself, then run docker compose up -d in this folder."
+  [ "$(uname -m)" = "x86_64" ] || die "GRG is published for 64-bit Intel/AMD servers (x86_64). This machine is $(uname -m)."
+else
+  # Docker Desktop runs as you, not as root, and writes to your home directory.
+  [ "$(id -u)" -eq 0 ] && die "Don't run this with sudo on a Mac — Docker Desktop runs as your own user."
+  INSTALL_DIR="${INSTALL_DIR_SET:-$HOME/grg}"
+fi
 
 cat <<EOF
 
@@ -162,8 +182,12 @@ EOF
 # ── Questions ───────────────────────────────────────────────────────────────────────────────────
 # Whatever address this server actually has on the network — the sensible default when there's no
 # public domain, and what everyone else will type to reach it.
-lan_ip="$( { ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; } || true )"
-[ -n "$lan_ip" ] || lan_ip="$( { hostname -I 2>/dev/null | awk '{print $1}'; } || true )"
+if [ "$PLATFORM" = "mac" ]; then
+  lan_ip="$( { route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}' | xargs -I{} ipconfig getifaddr {} ; } 2>/dev/null || true )"
+else
+  lan_ip="$( { ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; } || true )"
+  [ -n "$lan_ip" ] || lan_ip="$( { hostname -I 2>/dev/null | awk '{print $1}'; } || true )"
+fi
 
 ask APP_DOMAIN "Web address" \
   "What people will type to open GRG. Use your domain name if you have one. If this is a server on your own network, press Enter to use its network address — everyone on the network can reach that, with nothing to set up on their computers." \
@@ -225,18 +249,25 @@ EOF
 # Installed before the checks below because those need curl. Deliberately ahead of the "Continue?"
 # confirmation: these are small, standard packages, and without them nothing can be verified.
 step "Preparing"
-export DEBIAN_FRONTEND=noninteractive
-missing=""
-for pkg in ca-certificates curl openssl; do
-  case "$pkg" in
-    ca-certificates) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
-    *) command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
-  esac
-done
-if [ -n "$missing" ]; then
-  apt-get update -qq
-  # shellcheck disable=SC2086
-  apt-get install -y -qq $missing >/dev/null
+if [ "$PLATFORM" = "linux" ]; then
+  export DEBIAN_FRONTEND=noninteractive
+  missing=""
+  for pkg in ca-certificates curl openssl; do
+    case "$pkg" in
+      ca-certificates) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
+      *) command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    apt-get update -qq
+    # shellcheck disable=SC2086
+    apt-get install -y -qq $missing >/dev/null
+  fi
+else
+  # macOS ships both; nothing to install.
+  for tool in curl openssl; do
+    command -v "$tool" >/dev/null 2>&1 || die "This Mac is missing ${tool}, which is unusual. Install the Xcode command line tools: xcode-select --install"
+  done
 fi
 
 # ── Ports ───────────────────────────────────────────────────────────────────────────────────────
@@ -246,13 +277,27 @@ fi
 step "Checking ports 80 and 443"
 busy=""
 for port in 80 443; do
-  if command -v ss >/dev/null 2>&1; then
+  if [ "$PLATFORM" = "mac" ]; then
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1 && busy="$busy $port"
+  elif command -v ss >/dev/null 2>&1; then
     ss -Hltn "sport = :$port" 2>/dev/null | grep -q . && busy="$busy $port"
   elif command -v netstat >/dev/null 2>&1; then
     netstat -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${port}\$" && busy="$busy $port"
   fi
 done
 if [ -n "$busy" ]; then
+  if [ "$PLATFORM" = "mac" ]; then
+    holder="$(lsof -nP -iTCP:80 -sTCP:LISTEN -F c 2>/dev/null | awk '/^c/{print substr($0,2); exit}' || true)"
+    die "Port${busy} already in use${holder:+ (by ${holder})}.
+
+GRG needs ports 80 and 443. Something else is already serving on them — often the
+macOS built-in Apache. Turn it off with:
+
+    sudo apachectl stop
+    sudo launchctl unload -w /System/Library/LaunchDaemons/org.apache.httpd.plist
+
+Then run this again."
+  fi
   # ss reports the owner as users:(("nginx",pid=…)) — pull out just the quoted program name.
   holder="$(ss -Hltnp "sport = :80" 2>/dev/null | grep -oE '"[^"]+"' | head -1 | tr -d '"' || true)"
   die "Port${busy} already in use${holder:+ (by ${holder})}.
@@ -330,7 +375,8 @@ confirm "Continue?" || die "Nothing was changed."
 # ── Dependencies ────────────────────────────────────────────────────────────────────────────────
 step "Installing what's missing"
 missing=""
-for pkg in gnupg tar ufw; do
+[ "$PLATFORM" = "mac" ] && for pkg in tar; do :; done
+for pkg in $( [ "$PLATFORM" = "linux" ] && echo "gnupg tar ufw" ); do
   case "$pkg" in
     ca-certificates|gnupg) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
     *) command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
@@ -345,7 +391,30 @@ else
   info "Basic tools already present."
 fi
 
-if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+if [ "$PLATFORM" = "mac" ]; then
+  # Docker Desktop is a signed application bundle; it can't be installed unattended the way an apt
+  # package can, so on a Mac this script checks for it and starts it rather than installing it.
+  if ! command -v docker >/dev/null 2>&1; then
+    die "Docker Desktop isn't installed.
+
+Install it, start it, then run this again:
+
+    brew install --cask docker
+
+or download it from https://www.docker.com/products/docker-desktop/"
+  fi
+  if ! docker info >/dev/null 2>&1; then
+    info "Docker Desktop isn't running — starting it…"
+    open -a Docker 2>/dev/null || true
+    for _ in $(seq 1 60); do docker info >/dev/null 2>&1 && break; sleep 2; done
+    docker info >/dev/null 2>&1 || die "Docker Desktop didn't start. Open it from Applications, wait for it to say Running, then run this again."
+  fi
+  info "Docker Desktop is running: $(docker --version)"
+  if [ "$(uname -m)" = "arm64" ]; then
+    info "Apple Silicon: GRG's Intel images run through Docker's built-in translation."
+    info "It works, but it's slower than an Intel Mac or a Linux server."
+  fi
+elif command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   info "Docker already present: $(docker --version)"
 else
   info "Installing Docker…"
@@ -360,7 +429,7 @@ else
   apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin >/dev/null
   info "Installed: $(docker --version)"
 fi
-systemctl enable --now docker >/dev/null 2>&1 || true
+[ "$PLATFORM" = "linux" ] && { systemctl enable --now docker >/dev/null 2>&1 || true; }
 docker compose version >/dev/null 2>&1 || die "Docker installed but 'docker compose' isn't working. Try running this script again."
 
 # ── Files ───────────────────────────────────────────────────────────────────────────────────────
@@ -455,7 +524,7 @@ if [ -n "$GRG_VERSION" ]; then
 fi
 
 # ── Firewall ────────────────────────────────────────────────────────────────────────────────────
-if [ "$CONFIGURE_FIREWALL" -eq 1 ] && command -v ufw >/dev/null 2>&1; then
+if [ "$PLATFORM" = "linux" ] && [ "$CONFIGURE_FIREWALL" -eq 1 ] && command -v ufw >/dev/null 2>&1; then
   step "Securing the server"
   # Allow SSH first — turning the firewall on without it would lock you out of your own server.
   ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
@@ -493,7 +562,7 @@ info "Internet access is working."
 
 # Only act when IPv6 is genuinely broken: an address exists, but nothing is reachable through it.
 # A server with working IPv6, or none configured at all, is left completely alone.
-if command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+if [ "$PLATFORM" = "linux" ] && command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
   if [ "$(registry_probe -6 https://registry-1.docker.io/v2/)" = "unreachable" ]; then
     if [ "$FIX_IPV6" -eq 1 ]; then
       warn "This server has an IPv6 address but no working IPv6 connection."

@@ -7,10 +7,24 @@ Run it on your own server. One command, a few questions, about five minutes.
 
 ## Install
 
-On a fresh Ubuntu or Debian server:
+**Linux** — Ubuntu or Debian. Installs Docker and everything else it needs:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/gravestone-codes/grg-public/main/install.sh | sudo bash
+```
+
+**macOS** — needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) installed first;
+the script starts it if it isn't running. No `sudo`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/gravestone-codes/grg-public/main/install.sh | bash
+```
+
+**Windows** — needs [Docker Desktop](https://www.docker.com/products/docker-desktop/) too. In
+PowerShell, as Administrator:
+
+```powershell
+irm https://raw.githubusercontent.com/gravestone-codes/grg-public/main/install.ps1 | iex
 ```
 
 It asks you a few things — your web address, your email, the first sign-in account — then installs
