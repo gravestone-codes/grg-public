@@ -556,25 +556,63 @@ step "Starting GRG"
 docker compose up -d
 
 step "Waiting for it to come up"
+listen_port=80
+[ "$SITE_SCHEME" = "https" ] && listen_port=443
+
+# 401 means "you're not signed in" — exactly the right answer from a healthy server, so it counts
+# as success. NOTE: no -f here. --fail treats 401 as an error, which made this check impossible to
+# pass: curl printed the code through -w, then failed, and the fallback appended to it.
+#
+# --resolve pins the address to this machine, so this answers "is the software running?" without
+# depending on DNS. Whether the address resolves for other people is a separate question, asked
+# straight after — mixing the two is what turned a DNS problem into "it didn't start".
+app_status() {
+  local code=""
+  code="$(curl -sS -o /dev/null -m 8 -k --resolve "${APP_DOMAIN}:${listen_port}:127.0.0.1" \
+          -w '%{http_code}' "${SITE_SCHEME}://${APP_DOMAIN}/api/auth/me" 2>/dev/null)" || code=""
+  case "$code" in ""|000) echo "down" ;; *) echo "$code" ;; esac
+}
+
 ready=0
 for _ in $(seq 1 60); do
-  # 401 means "you're not signed in" — exactly right for a healthy server that's now serving.
-  code="$(curl -fsS -o /dev/null -w '%{http_code}' -m 5 -k "${SITE_SCHEME}://${APP_DOMAIN}/api/auth/me" 2>/dev/null || echo 000)"
-  case "$code" in 401|200) ready=1; break ;; esac
+  case "$(app_status)" in 401|200) ready=1; break ;; esac
   sleep 5
 done
 
+# Now the separate question: can it be reached at that address the ordinary way?
+reachable=0
 if [ "$ready" -eq 1 ]; then
+  code="$(curl -sS -o /dev/null -m 8 -k -w '%{http_code}' "${SITE_SCHEME}://${APP_DOMAIN}/api/auth/me" 2>/dev/null)" || code=""
+  case "$code" in 401|200) reachable=1 ;; esac
+fi
+
+if [ "$ready" -eq 1 ] && [ "$reachable" -eq 1 ]; then
   step "GRG is ready"
+elif [ "$ready" -eq 1 ]; then
+  step "GRG is running"
+  warn "It's working, but this server can't reach itself at ${APP_DOMAIN}."
+  warn "That's a name or firewall problem, not the application — it answers fine locally."
+  warn "It may still work from other computers. If not, check that ${APP_DOMAIN} points here."
 else
   step "Started, but not answering yet"
-  warn "The application is still starting, or the addresses aren't pointing here yet."
-  warn "Check on it with:  cd ${INSTALL_DIR} && docker compose logs -f"
+  warn "The containers are running but the application hasn't responded within 5 minutes."
+  warn "See what it's doing:  cd ${INSTALL_DIR} && docker compose logs -f backend proxy"
 fi
 
 cat <<EOF
 
   ${B}Open${N}        ${SITE_SCHEME}://${APP_DOMAIN}
+EOF
+
+# On the server itself the address may not resolve even when everything is fine, so give the one
+# that always works there.
+if [ "$ready" -eq 1 ] && [ "$reachable" -eq 0 ]; then
+  cat <<EOF
+  ${D}From this server itself, use ${SITE_SCHEME}://localhost${N}
+EOF
+fi
+
+cat <<EOF
   ${B}Installed${N}   ${INSTALL_DIR}
 EOF
 
