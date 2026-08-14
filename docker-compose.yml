@@ -141,7 +141,8 @@ services:
   proxy:
     image: caddy:2-alpine
     restart: unless-stopped
-    ports: ["80:80", "443:443"]
+    # 8081 carries photos on local networks, where a second hostname isn't available.
+    ports: ["80:80", "443:443", "8081:8081"]
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - frontend_dist:/srv/www:ro

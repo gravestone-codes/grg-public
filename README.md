@@ -17,13 +17,17 @@ It asks you a few things — your web address, your email, the first sign-in acc
 everything that's missing, sets it all up, and starts it. When it finishes it prints the address to
 open and the password for your first login.
 
-**You need:** a server with 1 GB of memory running Ubuntu or Debian, 64-bit Intel or AMD, and two
-web addresses pointing at it (below).
+**You need:** a server with 1 GB of memory running Ubuntu or Debian, 64-bit Intel or AMD. A domain
+name is optional — without one it runs on your network address and everyone on the network can
+reach it.
 
-### Web addresses
+### If you have a domain name
 
 Set up two DNS "A" records at your domain provider, both pointing at your server's IP address,
-**before** you install. The installer checks them and tells you if something's wrong.
+**before** you install. The installer checks them, and waits while you fix them if they're wrong.
+You get HTTPS automatically.
+
+Skip this entirely if you don't have a domain — see below.
 
 | Address | What it's for |
 |---|---|
@@ -42,40 +46,24 @@ sudo ./install.sh --domain garage.yourcompany.com --email you@yourcompany.com --
 
 Run `./install.sh --help` for all options.
 
-### On your own machine or a home network
+### No domain name? That's fine
 
-No domain, no DNS, no certificates. GRG detects a local address and serves plain `http://`, so
-there are no browser warnings and nothing to install or trust.
+Press Enter when it asks for the web address and it uses the server's own network address. Everyone
+on the same network can reach it immediately — no domain, no DNS, nothing to configure on anyone
+else's computer.
 
-**Just this machine** — you'll browse on the same computer that runs it:
+    Web address
+    What people will type to open GRG. Use your domain name if you have one. If this
+    is a server on your own network, press Enter to use its network address.
+    [192.168.1.50]
+    >
 
-```bash
-sudo ./install.sh --domain localhost --yes
-```
+You'd then open `http://192.168.1.50`. Photos are served from port 8081 of the same address
+automatically, so there's nothing else to set up.
 
-Open `http://localhost`.
-
-**A server on your network** — you'll browse from a different computer. Pick any name ending in
-`.lan`, and add two lines to `/etc/hosts` on each computer that will use GRG (replace the IP with
-your server's):
-
-```
-192.168.1.50   grg.lan
-192.168.1.50   media.grg.lan
-```
-
-Then on the server:
-
-```bash
-sudo ./install.sh --domain grg.lan --yes
-```
-
-Open `http://grg.lan` from any computer with those two lines. A name is required rather than a bare
-IP address, because photos are served from a second address and `media.192.168.1.50` isn't a valid
-name — the installer will tell you this if you try.
-
-Local mode is for trying GRG out and for private networks. Don't use it for a deployment reachable
-from the internet: without HTTPS, passwords cross the network in the clear.
+This mode uses plain HTTP, because certificates can't be issued for private addresses. That's fine
+on a network you control. Don't expose it to the internet that way — use a real domain, and the
+installer will set up HTTPS for you.
 
 ## What gets installed
 

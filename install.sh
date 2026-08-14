@@ -75,7 +75,7 @@ valid_domain() {
   case "$1" in
     *' '*|'')        printf '    That can'\''t be blank or contain spaces.\n'; return 1 ;;
     http*)           printf '    Leave off the "http://" — just the address, like garage.example.com\n'; return 1 ;;
-    *[!a-zA-Z0-9.-]*) printf '    Web addresses only contain letters, numbers, dots and hyphens.\n'; return 1 ;;
+    *[!a-zA-Z0-9.:-]*) printf '    Web addresses only contain letters, numbers, dots and hyphens.\n'; return 1 ;;
     # `localhost` has no dot but is perfectly valid, and is the obvious thing to type for a trial run.
     localhost)       return 0 ;;
     *.*)             return 0 ;;
@@ -152,32 +152,28 @@ cat <<EOF
 EOF
 
 # ── Questions ───────────────────────────────────────────────────────────────────────────────────
+# Whatever address this server actually has on the network — the sensible default when there's no
+# public domain, and what everyone else will type to reach it.
+lan_ip="$( { ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; } || true )"
+[ -n "$lan_ip" ] || lan_ip="$( { hostname -I 2>/dev/null | awk '{print $1}'; } || true )"
+
 ask APP_DOMAIN "Web address" \
-  "The address people will type to open GRG. It must already point at this server." \
-  "" valid_domain
+  "What people will type to open GRG. Use your domain name if you have one. If this is a server on your own network, press Enter to use its network address — everyone on the network can reach that, with nothing to set up on their computers." \
+  "$lan_ip" valid_domain
 
-# An IP address can't have a "media." prefix put in front of it, and photos need their own hostname
-# (their links are signed against it). Caught here rather than letting images silently fail later.
-case "$APP_DOMAIN" in
-  *[!0-9.]*) ;;
-  *.*.*.*)
-    die "Please use a name rather than an IP address.
+# On a local network there is no second hostname to give photos, and no DNS to create one. They go
+# on a port of the same address instead — which needs no DNS, no /etc/hosts, and no setup on any of
+# the machines that will use GRG. The signature on a photo link covers host AND port, and Caddy
+# passes both through untouched, so this validates exactly like a subdomain would.
+if is_local_address "$APP_DOMAIN"; then
+  MEDIA_DOMAIN="${MEDIA_DOMAIN:-${APP_DOMAIN}:8081}"
+fi
 
-Photos are served from a second address — normally media.${APP_DOMAIN} — and
-\"media.${APP_DOMAIN}\" isn't a valid name, so pictures would never load.
-
-On a home or office network, pick any name ending in .lan and point it at this
-server by adding two lines to /etc/hosts on each computer that will use GRG:
-
-    ${APP_DOMAIN}   grg.lan
-    ${APP_DOMAIN}   media.grg.lan
-
-Then run:  sudo ./install.sh --domain grg.lan" ;;
-esac
-
-ask MEDIA_DOMAIN "Address for photos and videos" \
-  "Photos and videos are served from a separate address for technical reasons. This one must point at this server too. Press Enter to accept." \
-  "media.${APP_DOMAIN}" valid_domain
+if ! is_local_address "$APP_DOMAIN"; then
+  ask MEDIA_DOMAIN "Address for photos and videos" \
+    "Photos and videos are served from a separate address for technical reasons. This one must point at this server too. Press Enter to accept." \
+    "media.${APP_DOMAIN}" valid_domain
+fi
 
 # A local install needs no certificate, no email, and no DNS — decided here so the questions below
 # and every check further down can skip what doesn't apply.
