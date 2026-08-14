@@ -42,17 +42,40 @@ sudo ./install.sh --domain garage.yourcompany.com --email you@yourcompany.com --
 
 Run `./install.sh --help` for all options.
 
-### Trying it on one machine
+### On your own machine or a home network
 
-Answer `localhost` when it asks for the web address. It skips DNS and certificates entirely and
-serves over plain `http://localhost` — no browser warnings, nothing to trust or install.
+No domain, no DNS, no certificates. GRG detects a local address and serves plain `http://`, so
+there are no browser warnings and nothing to install or trust.
+
+**Just this machine** — you'll browse on the same computer that runs it:
 
 ```bash
 sudo ./install.sh --domain localhost --yes
 ```
 
-Don't use `localhost` for a real deployment: without HTTPS, passwords cross the network in the clear.
-Fine on a laptop, wrong on anything other people reach.
+Open `http://localhost`.
+
+**A server on your network** — you'll browse from a different computer. Pick any name ending in
+`.lan`, and add two lines to `/etc/hosts` on each computer that will use GRG (replace the IP with
+your server's):
+
+```
+192.168.1.50   grg.lan
+192.168.1.50   media.grg.lan
+```
+
+Then on the server:
+
+```bash
+sudo ./install.sh --domain grg.lan --yes
+```
+
+Open `http://grg.lan` from any computer with those two lines. A name is required rather than a bare
+IP address, because photos are served from a second address and `media.192.168.1.50` isn't a valid
+name — the installer will tell you this if you try.
+
+Local mode is for trying GRG out and for private networks. Don't use it for a deployment reachable
+from the internet: without HTTPS, passwords cross the network in the clear.
 
 ## What gets installed
 

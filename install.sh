@@ -95,7 +95,13 @@ valid_any() { [ -n "$1" ] || { printf '    This one is needed.\n'; return 1; }; 
 # result with ERR_CERT_AUTHORITY_INVALID. Plain HTTP is the right answer on a loopback address.
 is_local_address() {
   case "$1" in
-    localhost|*.localhost|127.0.0.1|0.0.0.0|*.local|*.internal|*.test|*.example) return 0 ;;
+    localhost|*.localhost|0.0.0.0) return 0 ;;
+    # Private ranges (RFC 1918) and loopback. A certificate authority will never issue for these,
+    # so anything on a home or office network belongs here too, not just the machine itself.
+    10.*|127.*|192.168.*) return 0 ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[01].*) return 0 ;;
+    # Names that only ever resolve inside a local network.
+    *.local|*.lan|*.home|*.internal|*.localdomain|*.test|*.example) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -149,6 +155,25 @@ EOF
 ask APP_DOMAIN "Web address" \
   "The address people will type to open GRG. It must already point at this server." \
   "" valid_domain
+
+# An IP address can't have a "media." prefix put in front of it, and photos need their own hostname
+# (their links are signed against it). Caught here rather than letting images silently fail later.
+case "$APP_DOMAIN" in
+  *[!0-9.]*) ;;
+  *.*.*.*)
+    die "Please use a name rather than an IP address.
+
+Photos are served from a second address — normally media.${APP_DOMAIN} — and
+\"media.${APP_DOMAIN}\" isn't a valid name, so pictures would never load.
+
+On a home or office network, pick any name ending in .lan and point it at this
+server by adding two lines to /etc/hosts on each computer that will use GRG:
+
+    ${APP_DOMAIN}   grg.lan
+    ${APP_DOMAIN}   media.grg.lan
+
+Then run:  sudo ./install.sh --domain grg.lan" ;;
+esac
 
 ask MEDIA_DOMAIN "Address for photos and videos" \
   "Photos and videos are served from a separate address for technical reasons. This one must point at this server too. Press Enter to accept." \
