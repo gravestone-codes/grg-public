@@ -461,7 +461,48 @@ fi
 
 # ── Start ───────────────────────────────────────────────────────────────────────────────────────
 step "Downloading the application"
-docker compose pull || die "Couldn't download the application. Check this server can reach ghcr.io."
+# Images come from two registries — ghcr.io for GRG itself, Docker Hub for Postgres, Caddy, ZITADEL
+# and Garage — so a failure here must never blame just one of them. Retried because a partial pull
+# is usually transient: a later attempt often lands on a different address and completes.
+pull_ok=0
+for attempt in 1 2 3; do
+  if docker compose pull; then pull_ok=1; break; fi
+  [ "$attempt" -lt 3 ] && warn "Download attempt ${attempt} of 3 didn't finish — trying again…" && sleep 5
+done
+
+if [ "$pull_ok" -eq 0 ]; then
+  # Work out what's actually broken rather than guessing. Both registries are tried over IPv4 and
+  # IPv6 separately: a server with an IPv6 address but no route to it will resolve these hosts to
+  # IPv6 and then fail to connect, which looks like "no internet" but isn't.
+  probe() { curl -sS "$1" -o /dev/null -m 10 -w '%{http_code}' "$2" 2>/dev/null || echo "unreachable"; }
+  hub4="$(probe -4 https://registry-1.docker.io/v2/)"; hub6="$(probe -6 https://registry-1.docker.io/v2/)"
+  ghcr4="$(probe -4 https://ghcr.io/v2/)";             ghcr6="$(probe -6 https://ghcr.io/v2/)"
+
+  msg="Couldn't download all of the pieces GRG needs.
+
+  Docker Hub   IPv4 ${hub4}   IPv6 ${hub6}
+  ghcr.io      IPv4 ${ghcr4}   IPv6 ${ghcr6}
+"
+  if [ "$hub6" = "unreachable" ] || [ "$ghcr6" = "unreachable" ]; then
+    if [ "$hub4" != "unreachable" ] && [ "$ghcr4" != "unreachable" ]; then
+      msg="${msg}
+This server has an IPv6 address but no working IPv6 connection, so downloads that
+resolve to IPv6 fail while everything else works. Turn IPv6 off and try again:
+
+    echo 'net.ipv6.conf.all.disable_ipv6=1' | sudo tee /etc/sysctl.d/99-no-ipv6.conf
+    echo 'net.ipv6.conf.default.disable_ipv6=1' | sudo tee -a /etc/sysctl.d/99-no-ipv6.conf
+    sudo sysctl --system
+    sudo systemctl restart docker
+
+Then run this installer again — it picks up where it left off."
+    fi
+  else
+    msg="${msg}
+Check this server's internet connection and any firewall or proxy in front of it,
+then run this installer again — it picks up where it left off."
+  fi
+  die "$msg"
+fi
 
 step "Starting GRG"
 docker compose up -d
