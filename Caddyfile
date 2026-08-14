@@ -1,6 +1,11 @@
 # The only thing exposed to the network. Terminates TLS, serves the SPA, and reverse-proxies
 # the API to the backend.
 #
+# SITE_SCHEME is https everywhere real. It flips to http only for localhost-style addresses, which
+# cannot get a public certificate — Caddy would otherwise issue one from its own private authority
+# and every browser would refuse it with ERR_CERT_AUTHORITY_INVALID. Plain HTTP on a loopback
+# address is both safe and what people actually expect from a local install.
+#
 # TWO public hostnames, and no more. ZITADEL deliberately has none: its ZITADEL_EXTERNALDOMAIN is
 # the internal Docker service name (`zitadel`), because the backend — its only client — reaches it
 # that way. Publishing it on a real domain would hand browsers a Host that doesn't match the
@@ -11,7 +16,7 @@
 }
 
 # ── App: one host serves the SPA and proxies /api to Spring ──
-{$APP_DOMAIN} {
+{$SITE_SCHEME:https}://{$APP_DOMAIN} {
 	handle /api/* {
 		reverse_proxy backend:8080
 	}
@@ -36,6 +41,6 @@
 # because the presigned URL's SigV4 signature covers both — the backend signs URLs against this
 # exact domain, so any rewrite would invalidate the signature. This is also why media can't be
 # folded onto a path under APP_DOMAIN and needs a hostname of its own. ──
-{$MEDIA_DOMAIN} {
+{$SITE_SCHEME:https}://{$MEDIA_DOMAIN} {
 	reverse_proxy garage:3900
 }

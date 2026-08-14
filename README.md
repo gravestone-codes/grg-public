@@ -42,6 +42,18 @@ sudo ./install.sh --domain garage.yourcompany.com --email you@yourcompany.com --
 
 Run `./install.sh --help` for all options.
 
+### Trying it on one machine
+
+Answer `localhost` when it asks for the web address. It skips DNS and certificates entirely and
+serves over plain `http://localhost` — no browser warnings, nothing to trust or install.
+
+```bash
+sudo ./install.sh --domain localhost --yes
+```
+
+Don't use `localhost` for a real deployment: without HTTPS, passwords cross the network in the clear.
+Fine on a laptop, wrong on anything other people reach.
+
 ## What gets installed
 
 Everything runs in containers on your server. Nothing is sent anywhere else, and there is no

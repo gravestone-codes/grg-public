@@ -76,8 +76,10 @@ valid_domain() {
     *' '*|'')        printf '    That can'\''t be blank or contain spaces.\n'; return 1 ;;
     http*)           printf '    Leave off the "http://" — just the address, like garage.example.com\n'; return 1 ;;
     *[!a-zA-Z0-9.-]*) printf '    Web addresses only contain letters, numbers, dots and hyphens.\n'; return 1 ;;
+    # `localhost` has no dot but is perfectly valid, and is the obvious thing to type for a trial run.
+    localhost)       return 0 ;;
     *.*)             return 0 ;;
-    *)               printf '    That needs to be a full address, like garage.example.com\n'; return 1 ;;
+    *)               printf '    That needs to be a full address like garage.example.com, or "localhost" to try it on this machine.\n'; return 1 ;;
   esac
 }
 valid_email() {
@@ -87,6 +89,16 @@ valid_email() {
   esac
 }
 valid_any() { [ -n "$1" ] || { printf '    This one is needed.\n'; return 1; }; return 0; }
+
+# Addresses that can never get a public certificate. Nobody on the internet can prove ownership of
+# them, so Caddy would fall back to its own private authority and every browser would reject the
+# result with ERR_CERT_AUTHORITY_INVALID. Plain HTTP is the right answer on a loopback address.
+is_local_address() {
+  case "$1" in
+    localhost|*.localhost|127.0.0.1|0.0.0.0|*.local|*.internal|*.test|*.example) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 # ask <var> <label> <description> <default> <validator>
 ask() {
@@ -142,9 +154,21 @@ ask MEDIA_DOMAIN "Address for photos and videos" \
   "Photos and videos are served from a separate address for technical reasons. This one must point at this server too. Press Enter to accept." \
   "media.${APP_DOMAIN}" valid_domain
 
-ask ACME_EMAIL "Your email address" \
-  "Used only to warn you if the site's security certificate is about to expire. Never shown to anyone else." \
-  "admin@${APP_DOMAIN#*.}" valid_email
+# A local install needs no certificate, no email, and no DNS — decided here so the questions below
+# and every check further down can skip what doesn't apply.
+if is_local_address "$APP_DOMAIN"; then
+  SITE_SCHEME="http"
+  SKIP_DNS_CHECK=1
+  ACME_EMAIL="${ACME_EMAIL:-none@localhost}"
+  info ""
+  info "${APP_DOMAIN} is a local address, so GRG will be served over plain http://."
+  info "No certificate is involved, and your browser won't warn about one."
+else
+  SITE_SCHEME="https"
+  ask ACME_EMAIL "Your email address" \
+    "Used only to warn you if the site's security certificate is about to expire. Never shown to anyone else." \
+    "admin@${APP_DOMAIN#*.}" valid_email
+fi
 
 ask ADMIN_EMAIL "Sign-in email for the first account" \
   "The account you'll use to log in and create everyone else. A password is generated for you and shown at the end." \
@@ -162,9 +186,8 @@ cat <<EOF
   choose or remember any of them.${N}
 
   ${B}Ready to install${N}
-    Web address        https://${APP_DOMAIN}
-    Photos and videos  https://${MEDIA_DOMAIN}
-    Certificate email  ${ACME_EMAIL}
+    Web address        ${SITE_SCHEME}://${APP_DOMAIN}
+    Photos and videos  ${SITE_SCHEME}://${MEDIA_DOMAIN}
     First account      ${ADMIN_EMAIL}  (${ADMIN_NAME})
     Installing into    ${INSTALL_DIR}
 EOF
@@ -337,6 +360,7 @@ if [ -f .env ]; then
   info "Settings already exist here — keeping them, including your encryption key."
   APP_DOMAIN="$(grep -E '^APP_DOMAIN=' .env | cut -d= -f2- || echo "$APP_DOMAIN")"
   MEDIA_DOMAIN="$(grep -E '^MEDIA_DOMAIN=' .env | cut -d= -f2- || echo "$MEDIA_DOMAIN")"
+  SITE_SCHEME="$(grep -E '^SITE_SCHEME=' .env | cut -d= -f2- || echo "${SITE_SCHEME:-https}")"
   ADMIN_EMAIL="$(grep -E '^FIRST_ADMIN_EMAIL=' .env | cut -d= -f2- || echo "$ADMIN_EMAIL")"
   FRESH_INSTALL=0
 else
@@ -368,6 +392,8 @@ data could never be read again.
 APP_DOMAIN=${APP_DOMAIN}
 MEDIA_DOMAIN=${MEDIA_DOMAIN}
 ACME_EMAIL=${ACME_EMAIL}
+# http only for localhost-style addresses, which can't have a real certificate. https everywhere else.
+SITE_SCHEME=${SITE_SCHEME}
 GRG_VERSION=${GRG_VERSION:-latest}
 
 DB_NAME=grg
@@ -423,7 +449,7 @@ step "Waiting for it to come up"
 ready=0
 for _ in $(seq 1 60); do
   # 401 means "you're not signed in" — exactly right for a healthy server that's now serving.
-  code="$(curl -fsS -o /dev/null -w '%{http_code}' -m 5 -k "https://${APP_DOMAIN}/api/auth/me" 2>/dev/null || echo 000)"
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' -m 5 -k "${SITE_SCHEME}://${APP_DOMAIN}/api/auth/me" 2>/dev/null || echo 000)"
   case "$code" in 401|200) ready=1; break ;; esac
   sleep 5
 done
@@ -438,7 +464,7 @@ fi
 
 cat <<EOF
 
-  ${B}Open${N}        https://${APP_DOMAIN}
+  ${B}Open${N}        ${SITE_SCHEME}://${APP_DOMAIN}
   ${B}Installed${N}   ${INSTALL_DIR}
 EOF
 

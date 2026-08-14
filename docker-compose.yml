@@ -113,14 +113,14 @@ services:
       SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${DB_NAME}
       SPRING_DATASOURCE_USERNAME: ${DB_USER}
       SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
-      GRG_APP_BASE_URL: https://${APP_DOMAIN}
+      GRG_APP_BASE_URL: ${SITE_SCHEME:-https}://${APP_DOMAIN}
       GRG_ZITADEL_ISSUER: http://zitadel:8080
       GRG_ZITADEL_TOKEN_FILE: /machinekey/pat.txt
       GRG_FIRST_ADMIN_EMAIL: ${FIRST_ADMIN_EMAIL}
       GRG_FIRST_ADMIN_PASSWORD: ${FIRST_ADMIN_PASSWORD}
       GRG_FIRST_ADMIN_FULL_NAME: ${FIRST_ADMIN_FULL_NAME}
       GRG_STORAGE_INTERNAL_ENDPOINT: http://garage:3900
-      GRG_STORAGE_PUBLIC_ENDPOINT: https://${MEDIA_DOMAIN}
+      GRG_STORAGE_PUBLIC_ENDPOINT: ${SITE_SCHEME:-https}://${MEDIA_DOMAIN}
       GRG_STORAGE_REGION: garage
       GRG_STORAGE_BUCKET: grg-media
       GRG_STORAGE_ACCESS_KEY_ID: ${GARAGE_ACCESS_KEY_ID}
@@ -148,6 +148,7 @@ services:
       - caddy_data:/data
       - caddy_config:/config
     environment:
+      SITE_SCHEME: ${SITE_SCHEME:-https}
       APP_DOMAIN: ${APP_DOMAIN}
       MEDIA_DOMAIN: ${MEDIA_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL}
