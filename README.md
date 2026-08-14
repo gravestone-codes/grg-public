@@ -117,6 +117,12 @@ docker compose restart     # restart everything
 
 ## Notes
 
+- **Broken IPv6 is handled for you.** Some servers have an IPv6 address but no route out over it.
+  Downloads then resolve to IPv6 and fail halfway through, while everything else looks fine. The
+  installer detects this and turns IPv6 off before downloading. Pass `--keep-ipv6` to skip that,
+  and undo it any time with
+  `sudo rm /etc/sysctl.d/99-grg-no-ipv6.conf && sudo sysctl --system`.
+
 - **64-bit Intel/AMD servers only** (x86_64).
 - **Ubuntu and Debian.** On another system, install Docker yourself and use the
   `docker-compose.yml` here directly.

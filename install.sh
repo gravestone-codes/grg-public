@@ -25,6 +25,7 @@
 #   --yes                     don't ask anything; use defaults and flags
 #   --skip-dns-check          install even if the addresses don't point here yet
 #   --no-firewall             don't touch the firewall
+#   --keep-ipv6               leave IPv6 alone even if it's configured but unreachable
 set -euo pipefail
 
 APP_DOMAIN="${APP_DOMAIN:-}"
@@ -39,6 +40,7 @@ BUNDLE_REPO="${BUNDLE_REPO:-gravestone-codes/grg-public}"
 ASSUME_YES=0
 SKIP_DNS_CHECK=0
 CONFIGURE_FIREWALL=1
+FIX_IPV6=1
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -53,6 +55,7 @@ while [ $# -gt 0 ]; do
     -y|--yes)         ASSUME_YES=1; shift ;;
     --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
     --no-firewall)    CONFIGURE_FIREWALL=0; shift ;;
+    --keep-ipv6)      FIX_IPV6=0; shift ;;
     -h|--help)        sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Don't recognise that option: $1  (try --help)" >&2; exit 2 ;;
   esac
@@ -459,6 +462,52 @@ if [ "$CONFIGURE_FIREWALL" -eq 1 ] && command -v ufw >/dev/null 2>&1; then
   info "Only web traffic and SSH can reach this server. The database and storage stay internal."
 fi
 
+# ── Internet ────────────────────────────────────────────────────────────────────────────────────
+# A server can have an IPv6 address with no route out over it. Both registries publish AAAA records,
+# so downloads resolve to IPv6 and die with "network is unreachable" while everything else on the
+# machine looks perfectly healthy — it fails halfway through the pull, which reads like a broken
+# download rather than a broken network. Detected and corrected here so nobody has to work that out.
+step "Checking internet access"
+# Returns the HTTP status, or "unreachable". Note curl still prints 000 via -w when it can't
+# connect, so a bare `|| echo unreachable` would yield "000unreachable" and match nothing.
+registry_probe() {
+  local code=""
+  code="$(curl -sS "$1" -o /dev/null -m 10 -w '%{http_code}' "$2" 2>/dev/null)" || code=""
+  case "$code" in ""|000) echo "unreachable" ;; *) echo "$code" ;; esac
+}
+
+hub_v4="$(registry_probe -4 https://registry-1.docker.io/v2/)"
+if [ "$hub_v4" = "unreachable" ]; then
+  ghcr_v4="$(registry_probe -4 https://ghcr.io/v2/)"
+  [ "$ghcr_v4" = "unreachable" ] && die "This server can't reach the servers GRG downloads from.
+
+Check its internet connection, and any firewall or proxy in front of it, then run
+this again."
+fi
+info "Internet access is working."
+
+# Only act when IPv6 is genuinely broken: an address exists, but nothing is reachable through it.
+# A server with working IPv6, or none configured at all, is left completely alone.
+if command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+  if [ "$(registry_probe -6 https://registry-1.docker.io/v2/)" = "unreachable" ]; then
+    if [ "$FIX_IPV6" -eq 1 ]; then
+      warn "This server has an IPv6 address but no working IPv6 connection."
+      info "Switching IPv6 off, otherwise downloads that resolve to IPv6 will fail."
+      printf 'net.ipv6.conf.all.disable_ipv6=1\nnet.ipv6.conf.default.disable_ipv6=1\n' \
+        > /etc/sysctl.d/99-grg-no-ipv6.conf
+      sysctl --system >/dev/null 2>&1 || true
+      systemctl restart docker >/dev/null 2>&1 || true
+      # Docker takes a moment to accept connections again after a restart.
+      for _ in $(seq 1 20); do docker info >/dev/null 2>&1 && break; sleep 1; done
+      info "Done. To undo later: sudo rm /etc/sysctl.d/99-grg-no-ipv6.conf && sudo sysctl --system"
+    else
+      warn "IPv6 is configured but unreachable, and --keep-ipv6 was given. Downloads may fail."
+    fi
+  else
+    info "IPv6 is working."
+  fi
+fi
+
 # ── Start ───────────────────────────────────────────────────────────────────────────────────────
 step "Downloading the application"
 # Images come from two registries — ghcr.io for GRG itself, Docker Hub for Postgres, Caddy, ZITADEL
@@ -474,9 +523,8 @@ if [ "$pull_ok" -eq 0 ]; then
   # Work out what's actually broken rather than guessing. Both registries are tried over IPv4 and
   # IPv6 separately: a server with an IPv6 address but no route to it will resolve these hosts to
   # IPv6 and then fail to connect, which looks like "no internet" but isn't.
-  probe() { curl -sS "$1" -o /dev/null -m 10 -w '%{http_code}' "$2" 2>/dev/null || echo "unreachable"; }
-  hub4="$(probe -4 https://registry-1.docker.io/v2/)"; hub6="$(probe -6 https://registry-1.docker.io/v2/)"
-  ghcr4="$(probe -4 https://ghcr.io/v2/)";             ghcr6="$(probe -6 https://ghcr.io/v2/)"
+  hub4="$(registry_probe -4 https://registry-1.docker.io/v2/)"; hub6="$(registry_probe -6 https://registry-1.docker.io/v2/)"
+  ghcr4="$(registry_probe -4 https://ghcr.io/v2/)";             ghcr6="$(registry_probe -6 https://ghcr.io/v2/)"
 
   msg="Couldn't download all of the pieces GRG needs.
 
