@@ -26,6 +26,8 @@
 #   --skip-dns-check          install even if the addresses don't point here yet
 #   --no-firewall             don't touch the firewall
 #   --keep-ipv6               leave IPv6 alone even if it's configured but unreachable
+#   --no-wait                 don't wait for it to answer; finish as soon as it's started
+#   --wait <seconds>          how long to wait for it to answer (default 90)
 set -euo pipefail
 
 APP_DOMAIN="${APP_DOMAIN:-}"
@@ -41,6 +43,7 @@ ASSUME_YES=0
 SKIP_DNS_CHECK=0
 CONFIGURE_FIREWALL=1
 FIX_IPV6=1
+WAIT_SECONDS=90
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -56,6 +59,8 @@ while [ $# -gt 0 ]; do
     --skip-dns-check) SKIP_DNS_CHECK=1; shift ;;
     --no-firewall)    CONFIGURE_FIREWALL=0; shift ;;
     --keep-ipv6)      FIX_IPV6=0; shift ;;
+    --no-wait)        WAIT_SECONDS=0; shift ;;
+    --wait)           WAIT_SECONDS="$2"; shift 2 ;;
     -h|--help)        sed -n '2,/^set -euo/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "Don't recognise that option: $1  (try --help)" >&2; exit 2 ;;
   esac
@@ -568,16 +573,26 @@ listen_port=80
 # straight after — mixing the two is what turned a DNS problem into "it didn't start".
 app_status() {
   local code=""
-  code="$(curl -sS -o /dev/null -m 8 -k --resolve "${APP_DOMAIN}:${listen_port}:127.0.0.1" \
+  code="$(curl -sS -o /dev/null -m 5 -k --resolve "${APP_DOMAIN}:${listen_port}:127.0.0.1" \
           -w '%{http_code}' "${SITE_SCHEME}://${APP_DOMAIN}/api/auth/me" 2>/dev/null)" || code=""
   case "$code" in ""|000) echo "down" ;; *) echo "$code" ;; esac
 }
 
+# A cold start answers in about 30 seconds, so a long timeout only ever means something is wrong —
+# and sitting through minutes of silence to be told that is worse than being told sooner. Nothing
+# is lost by giving up early: the containers keep starting either way.
 ready=0
-for _ in $(seq 1 60); do
+waited=0
+while [ "$waited" -lt "$WAIT_SECONDS" ]; do
   case "$(app_status)" in 401|200) ready=1; break ;; esac
-  sleep 5
+  sleep 2
+  waited=$(( waited + 2 ))
+  # Progress, so it never looks like a hang. \r keeps it to a single line on a terminal.
+  if [ -t 1 ] && [ $(( waited % 10 )) -eq 0 ]; then
+    printf '\r    still starting… %ss' "$waited"
+  fi
 done
+[ -t 1 ] && printf '\r\033[K'
 
 # Now the separate question: can it be reached at that address the ordinary way?
 reachable=0
@@ -590,13 +605,14 @@ if [ "$ready" -eq 1 ] && [ "$reachable" -eq 1 ]; then
   step "GRG is ready"
 elif [ "$ready" -eq 1 ]; then
   step "GRG is running"
-  warn "It's working, but this server can't reach itself at ${APP_DOMAIN}."
-  warn "That's a name or firewall problem, not the application — it answers fine locally."
-  warn "It may still work from other computers. If not, check that ${APP_DOMAIN} points here."
+  info "Everything started correctly."
+  info "This server can't reach itself at ${APP_DOMAIN} — usually just the name not"
+  info "pointing here yet. It may already work from other computers; try it."
 else
-  step "Started, but not answering yet"
-  warn "The containers are running but the application hasn't responded within 5 minutes."
-  warn "See what it's doing:  cd ${INSTALL_DIR} && docker compose logs -f backend proxy"
+  step "Started — still coming up"
+  info "Everything is installed and running. It hadn't answered after ${waited}s, which is"
+  info "normal on a slow machine; it usually takes about 30. Open the address in a minute."
+  info "If it still doesn't: cd ${INSTALL_DIR} && docker compose logs -f backend proxy"
 fi
 
 cat <<EOF
@@ -621,14 +637,19 @@ if [ "${FRESH_INSTALL:-0}" -eq 1 ]; then
   ${B}Sign in${N}     ${ADMIN_EMAIL}
   ${B}Password${N}    ${ADMIN_PASSWORD}
 
-  ${Y}Write that password down now — it isn't shown again. GRG will ask you to
-  change it the first time you sign in.${N}
+  ${Y}Write that password down now. GRG will ask you to change it the first time
+  you sign in.${N} ${D}If you lose it before then:
+      sudo grep FIRST_ADMIN_PASSWORD ${INSTALL_DIR}/.env${N}
 
   ${Y}Back up ${INSTALL_DIR}/.env somewhere safe. It holds the key that unlocks
   your data; a backup restored without it can't be read.${N}
 EOF
 else
-  info "Updated. Your sign-in details haven't changed."
+  cat <<EOF
+  ${B}Sign in${N}     ${ADMIN_EMAIL}
+  ${D}Your password hasn't changed. To see it:${N}
+      sudo grep FIRST_ADMIN_PASSWORD ${INSTALL_DIR}/.env
+EOF
 fi
 
 cat <<EOF
