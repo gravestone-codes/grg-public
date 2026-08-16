@@ -768,3 +768,36 @@ cat <<EOF
   Update to the latest   sudo ${INSTALL_DIR}/install.sh --yes
 
 EOF
+
+# Installed inside WSL, GRG is reachable on this PC but nowhere else, because WSL's ports live in
+# its own network namespace rather than on the Windows machine. Rather than leave that as a puzzle,
+# print both ways out, with this WSL instance's current address already filled in.
+if [ "$IS_WSL" -eq 1 ]; then
+  wsl_ip="$( { hostname -I 2>/dev/null | awk '{print $1}'; } || true )"
+  cat <<EOF
+  ${B}Letting other computers reach this${N}
+
+  ${D}It works on this PC now, at ${SITE_SCHEME}://localhost. Other computers can't
+  reach it yet, because WSL keeps its ports on its own network.${N}
+
+  ${B}Best fix — Windows 11.${N} Put this in %USERPROFILE%\\.wslconfig, then run
+  "wsl --shutdown" and start WSL again. WSL then shares this PC's network, and
+  everything works with nothing else to do:
+
+      [wsl2]
+      networkingMode=mirrored
+
+  ${B}Windows 10${N} has no mirrored mode, so forward the ports instead. In PowerShell
+  as Administrator:
+
+      netsh interface portproxy add v4tov4 listenport=80   connectport=80   connectaddress=${wsl_ip:-<wsl-ip>}
+      netsh interface portproxy add v4tov4 listenport=443  connectport=443  connectaddress=${wsl_ip:-<wsl-ip>}
+      netsh interface portproxy add v4tov4 listenport=8081 connectport=8081 connectaddress=${wsl_ip:-<wsl-ip>}
+      New-NetFirewallRule -DisplayName "GRG" -Direction Inbound -Protocol TCP -LocalPort 80,443,8081 -Action Allow
+
+  ${Y}That address changes each time WSL restarts, so the forwarding has to be redone
+  after a reboot. Mirrored mode, or installing on Windows itself with install.ps1,
+  avoids that entirely.${N}
+
+EOF
+fi
