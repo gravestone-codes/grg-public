@@ -157,6 +157,13 @@ case "$(uname -s)" in
 On Windows, use install.ps1 from the same place, in PowerShell as Administrator." ;;
 esac
 
+# WSL reports itself as Linux, but its network sits behind the Windows host, which changes what
+# a "server" here can actually do — see the warning further down.
+IS_WSL=0
+if [ "$PLATFORM" = "linux" ]; then
+  if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]; then IS_WSL=1; fi
+fi
+
 if [ "$PLATFORM" = "linux" ]; then
   [ "$(id -u)" -eq 0 ] || die "Please run this with sudo."
   command -v apt-get >/dev/null 2>&1 || die "This installer handles Ubuntu and Debian automatically.
@@ -179,11 +186,37 @@ cat <<EOF
   It takes about five minutes. You'll be asked a few questions first.
 EOF
 
+# ── WSL ─────────────────────────────────────────────────────────────────────────────────────────
+# WSL has its own network behind the Windows host. Windows forwards localhost into it, so GRG will
+# work on this machine — but other computers cannot reach it, because the address seen in here is a
+# private WSL adapter, not the Windows machine's address on the network. Installing on Windows
+# itself avoids all of that: Docker Desktop publishes ports on the host, where everyone can see them.
+if [ "$IS_WSL" -eq 1 ]; then
+  warn "This is WSL — GRG will only be reachable from this Windows machine."
+  cat <<EOF
+
+  ${D}WSL sits behind its own network. Windows forwards localhost into it, so GRG
+  will work in a browser on this computer, but other people on your network
+  won't be able to reach it without extra port-forwarding rules in Windows.
+
+  If others need access, stop here and install on Windows itself instead —
+  Docker Desktop publishes the ports where everyone can see them:
+
+      irm https://raw.githubusercontent.com/gravestone-codes/grg-public/main/install.ps1 | iex
+
+  (in PowerShell, as Administrator).${N}
+EOF
+  confirm "Carry on installing inside WSL anyway?" || die "Nothing was changed."
+fi
+
 # ── Questions ───────────────────────────────────────────────────────────────────────────────────
 # Whatever address this server actually has on the network — the sensible default when there's no
 # public domain, and what everyone else will type to reach it.
 if [ "$PLATFORM" = "mac" ]; then
   lan_ip="$( { route -n get default 2>/dev/null | awk '/interface:/{print $2; exit}' | xargs -I{} ipconfig getifaddr {} ; } 2>/dev/null || true )"
+elif [ "$IS_WSL" -eq 1 ]; then
+  # Whatever WSL reports is its own virtual adapter, which no other computer can reach.
+  lan_ip="localhost"
 else
   lan_ip="$( { ip route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") {print $(i+1); exit}}'; } || true )"
   [ -n "$lan_ip" ] || lan_ip="$( { hostname -I 2>/dev/null | awk '{print $1}'; } || true )"
@@ -374,21 +407,23 @@ confirm "Continue?" || die "Nothing was changed."
 
 # ── Dependencies ────────────────────────────────────────────────────────────────────────────────
 step "Installing what's missing"
-missing=""
-[ "$PLATFORM" = "mac" ] && for pkg in tar; do :; done
-for pkg in $( [ "$PLATFORM" = "linux" ] && echo "gnupg tar ufw" ); do
-  case "$pkg" in
-    ca-certificates|gnupg) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
-    *) command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
-  esac
-done
-if [ -n "$missing" ]; then
-  info "Installing:$missing"
-  apt-get update -qq
-  # shellcheck disable=SC2086
-  apt-get install -y -qq $missing >/dev/null
-else
-  info "Basic tools already present."
+# Only Linux installs packages; macOS already has tar, and gnupg/ufw have no part to play there.
+if [ "$PLATFORM" = "linux" ]; then
+  missing=""
+  for pkg in gnupg tar ufw; do
+    case "$pkg" in
+      gnupg) dpkg -s "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
+      *)     command -v "$pkg" >/dev/null 2>&1 || missing="$missing $pkg" ;;
+    esac
+  done
+  if [ -n "$missing" ]; then
+    info "Installing:$missing"
+    apt-get update -qq
+    # shellcheck disable=SC2086
+    apt-get install -y -qq $missing >/dev/null
+  else
+    info "Basic tools already present."
+  fi
 fi
 
 if [ "$PLATFORM" = "mac" ]; then
@@ -524,7 +559,7 @@ if [ -n "$GRG_VERSION" ]; then
 fi
 
 # ── Firewall ────────────────────────────────────────────────────────────────────────────────────
-if [ "$PLATFORM" = "linux" ] && [ "$CONFIGURE_FIREWALL" -eq 1 ] && command -v ufw >/dev/null 2>&1; then
+if [ "$PLATFORM" = "linux" ] && [ "$IS_WSL" -eq 0 ] && [ "$CONFIGURE_FIREWALL" -eq 1 ] && command -v ufw >/dev/null 2>&1; then
   step "Securing the server"
   # Allow SSH first — turning the firewall on without it would lock you out of your own server.
   ufw allow OpenSSH >/dev/null 2>&1 || ufw allow 22/tcp >/dev/null 2>&1 || true
@@ -562,7 +597,7 @@ info "Internet access is working."
 
 # Only act when IPv6 is genuinely broken: an address exists, but nothing is reachable through it.
 # A server with working IPv6, or none configured at all, is left completely alone.
-if [ "$PLATFORM" = "linux" ] && command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
+if [ "$PLATFORM" = "linux" ] && [ "$IS_WSL" -eq 0 ] && command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null | grep -q inet6; then
   if [ "$(registry_probe -6 https://registry-1.docker.io/v2/)" = "unreachable" ]; then
     if [ "$FIX_IPV6" -eq 1 ]; then
       warn "This server has an IPv6 address but no working IPv6 connection."
@@ -678,10 +713,15 @@ elif [ "$ready" -eq 1 ]; then
   info "This server can't reach itself at ${APP_DOMAIN} — usually just the name not"
   info "pointing here yet. It may already work from other computers; try it."
 else
-  step "Started — still coming up"
-  info "Everything is installed and running. It hadn't answered after ${waited}s, which is"
-  info "normal on a slow machine; it usually takes about 30. Open the address in a minute."
-  info "If it still doesn't: cd ${INSTALL_DIR} && docker compose logs -f backend proxy"
+  step "Started"
+  if [ "$WAIT_SECONDS" -eq 0 ]; then
+    info "Everything is installed and starting. It usually answers within about 30 seconds."
+  else
+    info "Everything is installed and running, but it hadn't answered after ${waited}s."
+    info "That can be normal on a slow machine; it usually takes about 30."
+  fi
+  info "Open the address in a minute. If it still doesn't work:"
+  info "    cd ${INSTALL_DIR} && docker compose logs -f backend proxy"
 fi
 
 cat <<EOF
